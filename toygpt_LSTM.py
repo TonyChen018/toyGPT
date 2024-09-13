@@ -21,8 +21,6 @@ import torch.distributed as dist
 import torch.utils.data._utils.collate
 
 
-#实用工具函数
-#1.计算函数，用来计算损失losses
 class AverageMeter:
     def __init__(self):
         self.reset()

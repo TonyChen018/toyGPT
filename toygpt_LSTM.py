@@ -21,8 +21,6 @@ import torch.distributed as dist
 import torch.utils.data._utils.collate
 
 
-#实用工具函数
-#1.计算函数，用来计算损失losses
 class AverageMeter:
     def __init__(self):
         self.reset()
@@ -40,25 +38,15 @@ class AverageMeter:
         self.avg = self.sum / self.count
 
 
-#模型函数
-#1.定义多层感知机 Mlp (Multi layer perceptron),也就是多层的前馈神经网络  是一种全连接网络 
-#embed_dim 是输入的数据的维度  也就是词向量的维度为256
-#mlp_ratio是mlp的比率，比如我们给入一个维度为64的输入向量 那么mlp的第一层输出向量维度为256 = 64*4 ，作为第二层输入，第二层输入256维度 输出64=256/4维度
-#bias 是偏置 神经网络里需要有偏置神经元bias = True 是将偏置神经元加入了考量
-#layer_act act是activate的缩写 layer_act是层与层之间的激活函数，使用的是pytorch库里的nn库，内部自己写好的GELU函数
-#定义一个神经网络 我们最重要的就是两点：定义这个神经网络怎么初始化(__init__)、定义这个神经网络怎么前向传播
+
 class Mlp(nn.Module):
     def __init__(self, dim = 256, mlp_ratio = 4.0, bias = True, layer_activate = nn.GELU, dropout=0.0, device=None, dtype=None):
         factory_kwargs = {'device':device, 'dtype':dtype}
         super().__init__()
         mlp_dim = int(dim * mlp_ratio)
-        #第一个零件是embed_dim输入转成mlp_dim的输出 是线性层1  比如输入256维的向量 设置mlp_ratio==4.0 那么输出就是1024维度的向量
         self.fully_connected_layer1 = nn.Linear(dim, mlp_dim, bias = bias, **factory_kwargs)
-        #第二个零件是激活层，使用GELU函数对数据加入非线性，因为第一层是nn.Linear是完全线性的,我们需要引入激活层对整个结构加入非线性
         self.activate = layer_activate()
-        #第三个零件是线性层2 把mlp_dim的输入转成和这个神经网络的输入一样的维度embed_dim
         self.fully_connected_layer2 = nn.Linear(mlp_dim, dim, bias = bias, **factory_kwargs)
-        #第四个零件是随机丢弃 模拟多次训练的情形 这边设置了dropout参数为0.0即随机丢失的概率为0.0 不会丢失
         self.drop = nn.Dropout(dropout)
 
     def forward(self, input:torch.tensor):
@@ -69,26 +57,17 @@ class Mlp(nn.Module):
         result = self.drop(result_fully_connected_layer2)
         return result
 
-#2.自注意力机制
-#这里我们需要注意一个词叫projection——投影 我们在后面就能看到它的作用
-#qkv_bias = False意味着我们在引入Linear层的时候，只有矩阵乘法
+
 class selfattention(nn.Module):
     def __init__(self, dim, num_heads = 16, qkv_bias = False, attention_drop = 0.0, out_proj_drop = 0.0, device = None, dtype = None):
         factory_kwargs = {'device':device, 'dtype':dtype}
         super().__init__()
         self.embed_dim = dim
         self.num_heads = num_heads
-        #第一个零件是一个线性层叫输入投影层  我们输入一个维度为dim的向量  输出一个维度为3 * dim的向量  这其实就是使用embedding后的词向量去得到K Q V矩阵
-        #也对应着投影 把dim维度的向量投影成 3 * dim维度的向量
         self.input_projection_layer = nn.Linear(dim, 3 * dim, bias = qkv_bias, **factory_kwargs)
-        #第二个零件是一个线性层叫输出投影层 我们输入维度为dim的向量  输出一个维度为dim的向量  这其实就是softmax(QK^T)V = A V中模拟A乘以V的过程
         self.output_projection_layer = nn.Linear(dim, dim, bias = qkv_bias, **factory_kwargs)
-        #第三个零件是attention层的drop out
         self.attention_drop = nn.Dropout(attention_drop)
-        #第四个零件是输出层的drop out
         self.out_drop = nn.Dropout(out_proj_drop)
-
-        #使用我们自己写的初始化函数把模型数据都掷成初始状态
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -102,37 +81,27 @@ class selfattention(nn.Module):
         if self.output_projection_layer.bias is not None:
             nn.init.constant_(self.output_projection_layer.bias, 0.0)
 
-    #前向传播
-    #attention_mask = None即此处不适用掩盖的attention机制
-    #is_causal = False即此处不使用因果的attention机制，也就是mask
-    #scale = None也就是不使用因子去控制注意力机制分数，在Transformer里面这个因子其实是  1/sqrt(d_k)
+
     def forward(self, input, scale = None, attention_mask = None, is_causal = False):
-        #Batch Length Channel举个实例
-        #输入I love you 这是一句话 Batch == 1,也就是只有一句话（batch也就是一次处理的数据多少）   Length == 3 这句话里面有3个词    Channel == 256
-        #Channel == 256 是embedding的时候，把一个词变成一个256的token（token是基本单元的意思）  所以生成的矩阵input就会是256*3的大小，并且是个张量(tensor)
-        #如果我们访问input的shape，会返回(Batch,Length,Channel)这样的返回值
+
         Batch, Length, Channel = input.shape
-        #使用输入投影层把输入维度为dim的向量投影成维度为3*dim的向量
-        #再使用torch包内自带的分割函数chunk  对self.input_projection_layer层的最后一个维度3 * dim这个维度进行分割
-        #分割成3个维度  把3 * dim分割成dim
         q, k, v = torch.chunk(self.input_projection_layer(input), chunks = 3, dim = -1)
         q = q.contiguous().view(Batch, Length, self.num_heads, Channel // self.num_heads).transpose(1,2)#(B,H,L,C)
         k = k.contiguous().view(Batch, Length, self.num_heads, Channel // self.num_heads).transpose(1,2)
         v = v.contiguous().view(Batch, Length, self.num_heads, Channel // self.num_heads).transpose(1,2)
 
-        #step1 先判断有没有scale传进来
+
         if scale is None:
             scale = 1.0 / math.sqrt(Channel // self.num_heads)
 
-        #step2 使用scale控制     Q @ K^T
+
         #q (B,H,L,C)
         attention_score_matrix = scale * (q @ k.transpose(-2,-1))#(B,H,L,L)
 
-        #step3 看是否因果，如果是因果，但是非掩码 那就把mask矩阵作成一个下三角的
+
         if is_causal is True and (attention_mask is None):
             attention_mask = torch.tril(q.new_ones((Length, Length)))
         
-        #step4 如果是掩码的，那就把那些因果里为0的元素变成负无穷(因为我们用的是softmax)
         if attention_mask is not None:
             assert attention_mask.shape == (Length,Length)
             attention_score_matrix = attention_score_matrix.masked_fill(attention_mask == 0, float('-inf'))
@@ -174,15 +143,12 @@ class selflstm(nn.Module):
 
 
 
-#3.将注意力机制selfattention和多层感知机Mlp拼装成一个小块 block
 """class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio = 4.0, qkv_bias = False, drop = 0.0, attention_drop = 0.0, act_layer = nn.GELU, norm_layer = nn.LayerNorm, Attn = selfattention):
         super().__init__()
         self.normalization1 = norm_layer(dim)
         #def __init__(self, dim, num_heads = 16, qkv_bias = False, attention_drop = 0.0, out_proj_drop = 0.0, device = None, dtype = None)
-        #需要注意的是这里做了实例化
         self.attention = Attn(dim, num_heads = num_heads, qkv_bias = qkv_bias, attention_drop = attention_drop, out_proj_drop = drop)
-        #drop_path层暂时没有任何操作
         self.drop_path = nn.Identity()
         self.normalization2 = norm_layer(dim)
         #def __init__(self, embed_dim=256, mlp_ratio = 4.0, bias = True, layer_activate = nn.GELU, dropout=0.0, device=None, dtype=None)
@@ -191,15 +157,13 @@ class selflstm(nn.Module):
     #normalization1 ----->  selfattention ----->  add&norm  ----->  mlp  ----->add
     def forward(self, input):
         result_normalization1 = self.normalization1(input)
-        #因为self.attention已经做了实例化
-        #所以self.attention(store, is_causal)等价于self.attention.forward(store, is_causal) 
+        #self.attention(store, is_causal)等价于self.attention.forward(store, is_causal) 
         result_attention = self.attention(result_normalization1, is_causal = True)
         result_drop1 = self.drop_path(result_attention)
         #Add
         store = result_drop1 + input
         #Norm
         result_normalization2 = self.normalization2(store)
-        #同理和上面attention处相同，这里self.mlp同样也是做了实例化了，我们只需要把store给到forward即可
         result_mlp = self.mlp(result_normalization2)
         result_drop2 = self.drop_path(result_mlp)
         #Add
@@ -207,10 +171,8 @@ class selflstm(nn.Module):
         return result
     #我们只通过SelfAttention实现，所以不使用断言代码  师姐的断言代码里面包括了selflinearattention  selflstm"""
 
-#4.分词器 对文章、单词做预处理
+
 class Tokenizer:
-    #静态方法load_tokenizer，可以无需实例化调用
-    #这个静态方法加载网上已经训练好了的分词器
     @staticmethod
     def load_tokenizer(tokenizer_path = "/home/ChenYufan/gpt/tokenizer", max_sequence_length = 512):
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -218,35 +180,19 @@ class Tokenizer:
         vocab_size = tokenizer.vocab_size
         model_max_length = tokenizer.model_max_length
 
-        #GPT2 分词器是没有pad_token的开始填充标识的
-        #所以我们需要把句子开始填充的标识等于结束eos_tokenizer的标识
         if (hasattr(tokenizer, "pad_token") is False) or tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        #BertTokenizer 和 BertTokenizerFast
-        #不进行小写处理，所以如果训练好的分词器对输入的句子进行小写处理
-        #我们就关闭小写处理
         if hasattr(tokenizer, "do_lower_case") is True:
             tokenizer.do_lower_case = False
 
-        #tokens_to_ids默认输入为字符串列表，可以是list也可以是tuple
         def tokens_to_ids(text = [""]):
-            #断言text文档是一个列表或者是一个元组
             assert isinstance(text, list or tuple)
-            #断言文档的第一个元素是字符串
-            #也就是说你至少要有输入
             assert isinstance(text[0], str)
-            #输出需要是pytorch中的Tensor模式 return_tensors = 'pt'
-            #允许进行填充padding
-            #如果输入文本太长，允许进行截断分割truncation
             ids = tokenizer(text, return_tensors = 'pt',padding = True, truncation = True)
-            #返回输入的id，也就是把输入的词变成一个一个的id数字
-            #并且返回输入对应的mask也就是掩码，这个指示我们什么地方填充padding了，什么地方没有
             return ids.input_ids, ids.attention_mask
         
         def ids_to_tokens(input_ids):
-            #将input_ids 也就是输入对应的id序列，进行批量解码batch_decode
-            #跳过特殊的token，可能是在进行编码的时候加入到了文本中的
             return tokenizer.batch_decode(input_ids, skip_special_tokens = True)
         
         return tokenizer, vocab_size, model_max_length, tokens_to_ids, ids_to_tokens
@@ -262,7 +208,6 @@ class Dataset:
         arr = np.memmap(save, dtype = dtype, mode = 'w+', shape = (arr_len,))
         
         idx = 0
-        #for in tqdm.tqdm(range,desc)本身是和for in range没区别的，只是加入了进度条
         for batch_idx in tqdm.tqdm(range(total_batches), desc = f'writing to {save}'):
             batch = dset.shard(num_shards = total_batches, index = batch_idx, contiguous = True).with_format('numpy')
             arr_batch = np.concatenate(batch['ids'])
@@ -304,17 +249,11 @@ class Dataset:
 
     @classmethod
     def build_dataloader(cls, dataset: str = None, batch_per_gpu:int=32, tokens_to_ids = None, max_seqlen: int = 512, num_workers: int = 16, max_iters: int = 10000, shuffle = True, raw_text = False, distributed = True):
-        #这里要在正式训练的时候才知道为什么要看分布式训练的进程多少，这里还不理解
         if distributed is True:
             num_gpus = dist.get_world_size()
         else:
             num_gpus = torch.cuda.device_count()
-        
-        # 原文类型的数据集 DS_raw
-        # 封装处理文本数据集
-        # max_iter * batchsize = total_number
-        # max_iter 是告诉我们 一个epoch需要往设备里输入多少次数据，这就和一次输入的数据量密切相关
-        # 所以max_iter就是这个批次里面到底有多少个数据，就是len
+
         class DS_Raw(torch.utils.data.Dataset):
             def __init__(self, dataset: datasets.Dataset, max_iter = None, max_seqlen = max_seqlen, tokens_to_ids = tokens_to_ids):
                 self.dataset = dataset
@@ -330,13 +269,8 @@ class Dataset:
                 return self.max_iter
             
             def __getitem__ (self, idx):
-                # 保证我们去取一个样例的时候，idx怎么输入都不超过实际的大小
                 idx = idx % len(self.dataset)
-                # 在 dataset 里面取 text 的操作
                 text = self.dataset[idx]['text']
-                # input_ids 是 tokenizer作用后得到的张量
-                # attention_masks 是 tokenizer作用后返回的时候进行了 padding的检测标志
-                # 这里做了Truncation = True了，为什么还要这样写？
                 input_ids, attention_masks = self.tokens_to_ids([text])
                 inputs_tragets: torch.Tensor = input_ids[:, :self.max_seqlen + 1]
                 masks = (attention_masks[:, :self.max_seqlen + 1])[:, :-1].contiguous()
@@ -403,8 +337,7 @@ class Dataset:
 
         return data_loader
 
-#6.搭建GPT本体
-#nlayers是排列、搭建的block的多少，block是normalization、transformer、add一体的一个小块
+
 class toyGPT(nn.Module):
     def __init__(self, max_seqlen = 512, blocklayers = 6, embed_dim = 256, drop = 0.0, tokenizer_path = "/home/ChenYufan/gpt/tokenizer"):
         super().__init__()
@@ -423,10 +356,9 @@ class toyGPT(nn.Module):
         else:
             self.token_drop = nn.Dropout(drop)
 
-        #顺序性进行组合排列，把我们写好的类似block、embedding都排在一起
-        #transformer的输入是经过了词向量embedding和位置embedding的数据
+
         self.transformer = nn.LSTM(input_size=embed_dim ,hidden_size=embed_dim, num_layers=blocklayers, dropout=drop, batch_first=True)
-        #normalization层并不改变数据维度，只对数据做0均值化、方差归一化
+
         self.normalization = nn.LayerNorm(embed_dim, bias = False)
         self.lm_head = nn.Linear(embed_dim, self.vocab_size, bias = False)
 
@@ -435,19 +367,11 @@ class toyGPT(nn.Module):
             # https://paperswithcode.com/method/weight-tying
             self.layer_token_embedding.weight = self.lm_head.weight
 
-        #total_params用于获取整个模型内的所有参数
-        #self.named_parameters是toyGPT继承自nn.Module的一个方法   它作用于self本身用于获取self之中所有的命名好的参数
-        #self.named_parameters返回的是(name,parameter)
-        #k遍历所有name
-        #v遍历所有的参数对应张量
         total_params = sum({k: v.numel() for k, v in self.named_parameters()}.values())
         transformer_params = sum({k: v.numel() for k, v in self.transformer.named_parameters()}.values())
 
         print(f"model info: vocab_size:{self.vocab_size}, max_seqlen:{max_seqlen}, total_params:{total_params}, transformer_params:{transformer_params}")
 
-    #targets是用来计算losses的
-    #我们如果要计算losses就要保证输入和输出的shape是一样的
-    #recurrent没加
     def forward(self, input_ids: torch.Tensor, targets: Optional[torch.Tensor] = None, masks: Optional[torch.Tensor] = None):
         #inputs_ids是使用tokenizer处理过后的
         #B——batch size是输入句子数目或者说一次拿多少数据做计算     L——length是有多少词     F——feature也就是embedding_dim
@@ -482,7 +406,6 @@ class toyGPT(nn.Module):
         if isinstance(embedded, tuple):
             embedded = embedded[0]
 
-        #配合最后那个孤立的add 最后一个add & norm模块
         embedded = self.normalization(embedded)
 
         if targets is not None:
@@ -498,8 +421,6 @@ class toyGPT(nn.Module):
             else:
                 loss = loss.mean()
         else:
-            #没有targets，直接输出预测logits，输出loss时使用None
-            #没有targets的情况就是我们只有第一位
             assert B == 1
             logits = self.lm_head(embedded[:,[-1],:])
             loss = None
@@ -530,16 +451,11 @@ class toyGPT(nn.Module):
                 # 我们只在最高概率的k个里面进行选，这里赋 -infty 后续做softmax时可以得到概率为 0
                 logits[logits < v[:, [-1]]] = - float('inf')
             
-            # 沿着最后一个dim做softmax， 也就是沿着vocab_size那个维度做softmax
             probs = torch.nn.functional.softmax(logits, dim=-1)
-            # 依据概率进行抽取，选择只抽取一个 返回值是抽取的索引
             idx_next = torch.multinomial(probs, num_samples=1)
             #breakpoint()
-            # 把输出放在input_ids后面
             input_ids = torch.cat((input_ids, idx_next), dim=1)
-            # 把输出放到输出里面
             output_ids = torch.cat((output_ids, idx_next), dim=1)
-            # 如果这里我们生成了 end of text，就结束生成
             if idx_next == eos_token_id:
                 break
         
